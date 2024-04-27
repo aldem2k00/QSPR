@@ -1,6 +1,8 @@
 import torch
 from rdkit import Chem
 import networkx as nx
+import itertools as it
+
 
 class NDFeaturizer:
     atom_feature_names = (
