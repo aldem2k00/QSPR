@@ -53,9 +53,9 @@ class Featurizer:
         )
     )
 
-    def __init__(self, molecules=None, mappings_data=None, 
+    def __init__(self, molecules=None, mappings_data=None,
                  other_threshold=0.0, atom_features='all', bond_features='all'):
-        
+
         if mappings_data is not None:
 
             self.atom_feature_names = []
@@ -91,7 +91,7 @@ class Featurizer:
             if atom_features == 'all':
                 self.atom_feature_names = self.__class__.atom_feature_names
                 self.atom_methods = self.__class__.atom_methods
-            else:   
+            else:
                 assert isinstance(atom_features, tuple) or isinstance(atom_features, list)
                 assert len(atom_features)
                 self.atom_methods = {}
@@ -183,6 +183,13 @@ class Featurizer:
                 if val not in ret[name]:
                     ret[name].append(val)
 
+        return ret
+
+    def default_atom(self):
+        ret = torch.zeros(self.atom_dim, dtype=torch.float)
+        for name in self.atom_feature_names:
+            idx = self.mappings_data[name]['Default']
+            ret[idx] = 1.0
         return ret
 
     @staticmethod
@@ -280,7 +287,7 @@ class MPNNFeaturizer(Featurizer):
             x[i] = self.atom_tensor(atom)
         for i, bond in enumerate(mol.GetBonds()):
             edge_index[:,i] = torch.tensor([
-                bond.GetBeginAtomIdx(), 
+                bond.GetBeginAtomIdx(),
                 bond.GetEndAtomIdx()])
             edge_attr[i] = self.bond_tensor(bond)
         edge_index = torch.cat((edge_index, edge_index.flip(dims=(0,))), dim=1).contiguous()
