@@ -291,3 +291,20 @@ class RPETransformer(nn.Module):
             r = self.reconstruct(u)
             return x, r
         return x
+
+
+##############################################################################
+#                                   FFN
+##############################################################################
+
+
+class FFN(nn.Module):
+    def __init__(self, in_dim, h_dim, out_dim):
+        super().__init__()
+        self.nn = nn.Sequential(
+            nn.Linear(self.in_dim, self.h_dim),
+            nn.ReLU(),
+            nn.Linear(self.h_dim, self.out_dim)
+        )
+    def forward(self, x):
+        return self.nn(x)
