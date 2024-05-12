@@ -1,5 +1,6 @@
 import rdkit
 from rdkit import Chem
+from rdkit.Chem import rdFingerprintGenerator
 
 import numpy as np
 import torch
@@ -28,6 +29,8 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, d):
         return self.pe[d]
+
+
 
 class Featurizer:
 
@@ -353,3 +356,13 @@ class RPETFeaturizer(Featurizer):
             for y in x[1].keys():
                 ret[x[0], y] = x[1][y]
         return ret
+
+
+class MorganFeaturizer:
+    def __init__(self, bits, radius):
+        self.bits = bits
+        self.radius = radius
+        self.gen = rdFingerprintGenerator.GetMorganGenerator(radius=radius,fpSize=bits)
+    def featurize(self, molecules):
+        mol_fps = [self.gen.GetFingerprintAsNumPy(molecule).astype(np.float32) for molecule in molecules]
+        return np.stack(mol_fps)
