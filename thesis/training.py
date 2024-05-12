@@ -4,17 +4,22 @@ from models import NeuralDevice, MPNN, RPETransformer, FFN
 from copy import deepcopy
 import io
 from torch_geometric.data import Batch
+import torch
+from torch import nn
+import numpy as np
 
 
-def train_model(model, loss_func, optimizer, max_n_epoch, overfit_patience, 
-                loader, X_train, y_train, X_val, y_val, batch_size):
+def train_model(model, loss_func, optimizer, max_n_epoch, overfit_patience,
+                scheduler_patience, loader, X_train, y_train, X_val, y_val, 
+                batch_size):
 
     log_stream = io.StringIO()
-    lr_0 = opt.state_dict()['param_groups'][0]['lr']
+    lr_0 = optimizer.state_dict()['param_groups'][0]['lr']
     best_state = deepcopy(model.state_dict())
     sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer=optimizer,
         factor=0.5,
+        patience=scheduler_patience
     )
     min_val_loss = float('inf')
     overfit_counter = 0
@@ -29,8 +34,8 @@ def train_model(model, loss_func, optimizer, max_n_epoch, overfit_patience,
             loss = loss_func(pred, y)
             loss.backward()
             train_loss += loss.item()
-            opt.step()
-            opt.zero_grad()
+            optimizer.step()
+            optimizer.zero_grad()
 
         log_stream.write(f'epoch: {i+1}, train_loss: {train_loss}, ')
 
@@ -39,6 +44,7 @@ def train_model(model, loss_func, optimizer, max_n_epoch, overfit_patience,
             for X, y in loader(X_val, y_val, batch_size=batch_size, shuffle=False):
                 pred = model(*X)
                 loss = loss_func(pred, y)
+
                 val_loss += loss.item()
 
         log_stream.write(f'val_loss: {val_loss}\n')
@@ -72,10 +78,11 @@ class Loader:
 
 class MPNNLoader(Loader):
 
-    def __init__(self, target_dtype, device='cpu', reconstruct=True):
-        super.__init__(target_dtype, device)
+    def __init__(self, target_dtype, task, device='cpu', reconstruct=True):
+        super().__init__(target_dtype, device)
 
         self.reconstruct = reconstruct
+        self.task = task
 
     def __call__(self, X, y, batch_size=32, shuffle=True):
 
@@ -88,20 +95,24 @@ class MPNNLoader(Loader):
             self.indices = np.arange(N)
 
         for i in range(0, N, batch_size):
-            curr_indices = indices[i:i+batch_size]
+            curr_indices = self.indices[i:i+batch_size]
             batch_X = [X[idx].to(self.device) for idx in curr_indices]
             batch_X = Batch.from_data_list(batch_X)
-            batch_y = torch.tensor([ys[idx] for idx in curr_indices], device=self.device, dtype=self.target_dtype)
+            batch_y = torch.tensor([y[idx] for idx in curr_indices], device=self.device, dtype=self.target_dtype)
+            if self.task == '1r':
+                if len(batch_y.shape) == 1:
+                    batch_y = batch_y.view(-1, 1)
             if self.reconstruct:
                 batch_y = (batch_y, batch_X.x)
             yield (batch_X.x, batch_X.edge_index, batch_X.edge_attr, batch_X.batch), batch_y
 
 
-class NDLoader:
+class NDLoader(Loader):
 
-    def __init__(self, target_dtype, device='cpu'):
-        super.__init__(target_dtype, device)
-
+    def __init__(self, target_dtype, task, device='cpu'):
+        super().__init__(target_dtype, device)
+        self.task = task
+        
     def __call__(self, X, y, batch_size=32, shuffle=True):
 
         N = len(X)
@@ -125,15 +136,18 @@ class NDLoader:
                     eye_inputs[k].append(X[j][k])
                     batch_indices[k].extend([idx,]*X[j][k].shape[0])
             batch_X = tuple(torch.cat(eye_inputs[k], dim=0).to(self.device) for k in range(K))
-            batch_indices = torch.tensor(batch_indices, device=self.device, dtype=torch.int32)
+            batch_indices = tuple(torch.tensor(batch_indices[k], device=self.device, dtype=torch.int64) for k in range(K))
             batch_y = torch.tensor(targets, device=self.device, dtype=self.target_dtype)
+            if self.task == '1r':
+                if len(batch_y.shape) == 1:
+                    batch_y = batch_y.view(-1, 1)
             yield (batch_X, batch_indices), batch_y
 
 
 class ReconstructLoss(nn.Module):
 
     def __init__(self, task, coefs=(1., 1.), ce_weight=None):
-
+        super().__init__()
         if task == 'classification':
             self.task_loss = nn.CrossEntropyLoss(weight=ce_weight)
         elif task == 'regression':
@@ -143,10 +157,14 @@ class ReconstructLoss(nn.Module):
 
     def forward(self, inpt, target):
 
-        task_input, reconstruct_input = inpt
-        task_target, reconstruct_target = target
-        return (self.task_loss(task_input, task_target) * self.coefs[0]
-              + self.reconstruct_loss(reconstruct_input, reconstruct_target) * self.coefs[1])
+        if isinstance(inpt, tuple):
+            task_input, reconstruct_input = inpt
+            task_target, reconstruct_target = target
+            return (self.task_loss(task_input, task_target) * self.coefs[0]
+                  + self.reconstruct_loss(reconstruct_input, reconstruct_target) * self.coefs[1])
+                  
+        return self.task_loss(inpt, target[0])
+        
 
 
 class FFNLoader(Loader):
@@ -155,8 +173,9 @@ class FFNLoader(Loader):
         super().__init__(target_dtype, device)
 
     def __call__(self, X, y, batch_size=32, shuffle=True):
-        N = len(x)
+        N = len(X)
         assert N == len(y)
+        X = np.array(X)
         y = np.array(y)
 
         if shuffle:
@@ -168,4 +187,6 @@ class FFNLoader(Loader):
             curr_indices = indices[i:i+batch_size]
             batch_X = torch.tensor(X[curr_indices], dtype=torch.float, device=self.device)
             batch_y = torch.tensor(y[curr_indices], dtype=self.target_dtype, device=self.device)
+            if len(batch_y.shape) == 1:
+                batch_y = batch_y.view(-1, 1)
             yield batch_X, batch_y
