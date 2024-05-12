@@ -14,7 +14,7 @@ import torch_geometric.nn as gnn
 class NeuralDevice(nn.Module):
 
     def __init__(self, eyes_dict, brain_nfs):
-        
+
         super().__init__()
 
         self.eye_names = list(eyes_dict.keys())
@@ -29,11 +29,11 @@ class NeuralDevice(nn.Module):
         eyes_outputs = []
         maxlen = max(batch_indices[0]) + 1
         for i, name in enumerate(self.eye_names):
-            eye_output = self.get_submodule(name)(x[i], torch.tensor(batch_indices[i], device=device))
+            eye_output = self.get_submodule(name)(x[i], batch_indices[i])
             L = eye_output.shape[0]
             if L < maxlen:
                 nf = eye_output.shape[1]
-                eye_output = torch.cat((eye_output, torch.zeros((maxlen - L, nf), device=device)), dim=0)
+                eye_output = torch.cat((eye_output, torch.zeros((maxlen - L, nf))), dim=0)
             eyes_outputs.append(eye_output)
         return self.brain(torch.cat(eyes_outputs, dim=1))
 
@@ -124,12 +124,12 @@ class MPNN(nn.Module):
 
         self.reg = reg
         if self.reg:
-            assert isinstance(default_atom, torch.tensor) and isinstance(default_proba, float)
+            assert isinstance(default_atom, torch.Tensor) and isinstance(default_proba, float)
             self.atom_mask = AtomMask(default_atom, default_proba)
 
         self.embed = Embed(
             node_in=atom_dim,
-            node_h=atom_dim + h_dim,
+            node_h=atom_dim + atom_h_dim,
             node_out=atom_h_dim,
             edge_in=bond_dim,
             edge_h=bond_dim + bond_h_dim,
@@ -179,7 +179,7 @@ class MPNN(nn.Module):
 
     def forward(self, x, edge_index, edge_attr, batch_index=None):
 
-        if self.reg:
+        if self.reg and self.training:
             x = self.atom_mask(x)
         x, edge_attr = self.embed(x, edge_attr)
         h = x.unsqueeze(0)
@@ -191,7 +191,7 @@ class MPNN(nn.Module):
         u = self.updim(x)
         x = self.aggregate(u, index=batch_index)
         x = self.clf(x)
-        if self.rec:
+        if self.rec and self.training:
             r = self.reconstruct(u)
             return x, r
         return x
@@ -220,15 +220,18 @@ class RPETConv(gnn.MessagePassing):
         self.v = nn.Linear(dim, dim)
 
     def forward(self, x, edge_index, edge_attr):
+
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
     def update(self, inputs, x):
+
         x = x_skip = self.norm1(x + inputs)
         x = self.ffn(x)
         x = self.norm2(x + x_skip)
         return x
 
     def message(self, x_i, x_j, edge_index, edge_attr):
+
         px_j = x_j + edge_attr
         q = self.q(x_i)
         k = self.k(px_j)
@@ -242,6 +245,7 @@ class RPETConv(gnn.MessagePassing):
 
 
 class RPETransformer(nn.Module):
+
     def __init__(self, in_nf, dim, n_layers, n_out=2, rec=True, reg=False, 
                  default_atom=None, default_proba=None):
         super().__init__()
@@ -250,7 +254,7 @@ class RPETransformer(nn.Module):
 
         self.reg = reg
         if self.reg:
-            assert isinstance(default_atom, torch.tensor) and isinstance(default_proba, float)
+            assert isinstance(default_atom, torch.Tensor) and isinstance(default_proba, float)
             self.atom_mask = AtomMask(default_atom, default_proba)
 
         self.atom_embedding = nn.Sequential(
@@ -280,14 +284,15 @@ class RPETransformer(nn.Module):
         )
 
     def forward(self, x, edge_index, edge_attr, batch_index=None):
-        if self.reg:
+        
+        if self.reg and self.training:
             x = self.atom_mask(x)
         x = self.atom_embedding(x)
         x = self.conv(x, edge_index, edge_attr)
         u = self.updim(x)
         x = self.readout(u, index=batch_index)
         x = self.clf(x)
-        if self.rec:
+        if self.rec and self.training:
             r = self.reconstruct(u)
             return x, r
         return x
@@ -301,10 +306,13 @@ class RPETransformer(nn.Module):
 class FFN(nn.Module):
     def __init__(self, in_dim, h_dim, out_dim):
         super().__init__()
+        self.in_dim = in_dim
+        self.h_dim = h_dim
+        self.out_dim = out_dim
         self.nn = nn.Sequential(
-            nn.Linear(self.in_dim, self.h_dim),
+            nn.Linear(in_dim, h_dim),
             nn.ReLU(),
-            nn.Linear(self.h_dim, self.out_dim)
+            nn.Linear(h_dim, out_dim)
         )
     def forward(self, x):
         return self.nn(x)
