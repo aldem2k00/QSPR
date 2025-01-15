@@ -21,6 +21,7 @@ class NeuralDevice(nn.Module):
 
         for eye_name, eye_hparams in eyes_dict.items():
             self.add_module(eye_name, NDEye(*eye_hparams))
+            self.register_buffer(f'pad_{eye_name}', torch.zeros(1, eye_hparams[-1]))
 
         self.brain = NDBrain(*brain_nfs)
 
@@ -33,7 +34,7 @@ class NeuralDevice(nn.Module):
             L = eye_output.shape[0]
             if L < maxlen:
                 nf = eye_output.shape[1]
-                eye_output = torch.cat((eye_output, torch.zeros((maxlen - L, nf))), dim=0)
+                eye_output = torch.cat((eye_output, torch.tile(getattr(self, f'pad_{name}'), (maxlen - L, 1))), dim=0)
             eyes_outputs.append(eye_output)
         return self.brain(torch.cat(eyes_outputs, dim=1))
 
@@ -185,6 +186,99 @@ class MPNN(nn.Module):
         h = x.unsqueeze(0)
         for i in range(self.n_layers):
             x = self.convolve(x, edge_index, edge_attr)
+            x = self.get_submodule(f'norm{i}')(x).unsqueeze(0)
+            x, h = self.gru(x, h)
+            x = x.squeeze(0)
+        u = self.updim(x)
+        x = self.aggregate(u, index=batch_index)
+        x = self.clf(x)
+        if self.rec and self.training:
+            r = self.reconstruct(u)
+            return x, r
+        return x
+
+
+class MPNN_nwt(nn.Module): # no weight tying
+
+    def __init__(self, atom_dim, bond_dim, atom_h_dim=16, bond_h_dim=8, out_dim=2, 
+                 n_layers=4, rec=True, reg=False, default_atom=None, default_proba=None):
+        super().__init__()
+
+        self.reg = reg
+        if self.reg:
+            assert isinstance(default_atom, torch.Tensor) and isinstance(default_proba, float)
+            self.atom_mask = AtomMask(default_atom, default_proba)
+
+        self.embed = Embed(
+            node_in=atom_dim,
+            node_h=atom_dim + atom_h_dim,
+            node_out=atom_h_dim,
+            edge_in=bond_dim,
+            edge_h=bond_dim + bond_h_dim,
+            edge_out=bond_h_dim,
+        )
+
+        self.convolve = gnn.GINEConv(
+            nn=nn.Sequential(
+                nn.Linear(atom_h_dim, atom_h_dim*2),
+                nn.ReLU(),
+                nn.Linear(atom_h_dim*2, atom_h_dim)
+            ),
+            edge_dim=bond_h_dim,
+        )
+
+        self.n_layers = n_layers
+
+        for i in range(self.n_layers):
+            
+            self.add_module(f'conv{i}', 
+                gnn.GINEConv(
+                    nn=nn.Sequential(
+                        nn.Linear(atom_h_dim, atom_h_dim*2),
+                        nn.ReLU(),
+                        nn.Linear(atom_h_dim*2, atom_h_dim)
+                    ), 
+                    edge_dim=bond_h_dim,
+                )
+            )
+                            
+            self.add_module(f'norm{i}', gnn.LayerNorm(atom_h_dim))
+
+        self.gru = nn.GRU(
+            input_size=atom_h_dim,
+            hidden_size=atom_h_dim
+        )
+
+        self.updim = nn.Sequential(
+            nn.Linear(atom_h_dim, atom_h_dim*2),
+            nn.LeakyReLU(0.01),
+            nn.Linear(atom_h_dim*2, atom_h_dim*2),
+            nn.LayerNorm(atom_h_dim*2)
+        )
+
+        self.aggregate = gnn.aggr.MeanAggregation()
+
+        self.clf = nn.Sequential(
+            nn.Linear(atom_h_dim*2, atom_h_dim*4),
+            nn.ReLU(),
+            nn.Linear(atom_h_dim*4, out_dim, bias=False)
+        )
+
+        self.rec = rec
+        self.reconstruct = nn.Sequential(
+            nn.Linear(atom_h_dim*2, atom_h_dim*4),
+            nn.ReLU(),
+            nn.Linear(atom_h_dim*4, atom_dim)
+        )
+
+    def forward(self, x, edge_index, edge_attr, batch_index=None):
+
+        if self.reg and self.training:
+            x = self.atom_mask(x)
+        x, edge_attr = self.embed(x, edge_attr)
+        h = x.unsqueeze(0)
+        for i in range(self.n_layers):
+            x = self.get_submodule(f'conv{i}')(x, edge_index, edge_attr)
             x = self.get_submodule(f'norm{i}')(x).unsqueeze(0)
             x, h = self.gru(x, h)
             x = x.squeeze(0)
