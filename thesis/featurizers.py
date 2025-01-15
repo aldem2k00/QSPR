@@ -237,7 +237,7 @@ class NDFeaturizer(Featurizer):
         a_list = []
         for i, atom in enumerate(mol.GetAtoms()):
             g.add_node(i)
-            a_list.append(self.atom_tensor(atom).view(1, -1))
+            a_list.append(self.atom_tensor(atom).view(1, -1).type(torch.uint8))
         for bond in mol.GetBonds():
             g.add_edge(
                 bond.GetBeginAtomIdx(),
@@ -351,7 +351,7 @@ class RPETFeaturizer(Featurizer):
     def graph_rp(cls, g):
         spl = list(nx.all_pairs_shortest_path_length(g))
         N = g.number_of_nodes()
-        ret = np.zeros((N, N), dtype=np.int32)
+        ret = np.zeros((N, N), dtype=np.int64)
         for x in spl:
             for y in x[1].keys():
                 ret[x[0], y] = x[1][y]
